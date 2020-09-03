@@ -1,10 +1,7 @@
 {"1.1.0",
-[{<<"bcrypt">>,
-  {git,"git://github.com/erlangpack/bcrypt",
-       {ref,"09ef470dbb11a3252517b2095cb4ddceec83479e"}},
-  0},
+[{<<"bcrypt">>,{pkg,<<"bcrypt">>,<<"1.0.3">>},0},
  {<<"bson">>,
-  {git,"git://github.com/comtihon/bson-erlang",
+  {git,"git://github.com/vintenove/bson-erlang",
        {ref,"14308ab927cfa69324742c3de720578094e0bb19"}},
   1},
  {<<"certifi">>,{pkg,<<"certifi">>,<<"2.5.2">>},1},
@@ -32,7 +29,7 @@
   1},
  {<<"eleveldb">>,
   {git,"git://github.com/vernemq/eleveldb.git",
-       {ref,"d2149fbaba3815399f144fa70dc37c645d229fe4"}},
+       {ref,"040bd6b4d5b05409b78db5ffa60483b46e3fdfc6"}},
   0},
  {<<"emysql">>,
   {git,"git://github.com/vernemq/Emysql.git",
@@ -70,7 +67,7 @@
   0},
  {<<"parse_trans">>,{pkg,<<"parse_trans">>,<<"3.3.0">>},1},
  {<<"pbkdf2">>,
-  {git,"git://github.com/comtihon/erlang-pbkdf2.git",
+  {git,"https://github.com/basho/erlang-pbkdf2.git",
        {ref,"5201a735639496fc595061160117e4ec155d73f5"}},
   1},
  {<<"plumtree">>,
@@ -97,6 +94,7 @@
   0}]}.
 [
 {pkg_hash,[
+ {<<"bcrypt">>, <<"DDF1E449D3EFB6D97B90421FAF8CE25729732CDE81F576E33EE767B5766C4B91">>},
  {<<"certifi">>, <<"B7CFEAE9D2ED395695DD8201C57A2D019C0C43ECAF8B8BCB9320B40D6662F340">>},
  {<<"cowboy">>, <<"99AA50E94E685557CAD82E704457336A453D4ABCB77839AD22DBE71F311FCC06">>},
  {<<"cowlib">>, <<"A7FFCD0917E6D50B4D5FB28E9E2085A0CEB3C97DEA310505F7460FF5ED764CE9">>},
