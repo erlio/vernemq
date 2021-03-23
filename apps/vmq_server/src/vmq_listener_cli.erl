@@ -278,10 +278,13 @@ parse_port(StrP) ->
     end.
 
 parse_addr(StrA) ->
-    case inet:parse_address(StrA) of
-        {ok, Ip} -> Ip;
-        {error, einval} ->
-            {error, {invalid_args,[{address, StrA}]}}
+    case string:split(StrA, ":") of
+        ["local", FS] -> {local, FS};
+        _ -> case inet:parse_address(StrA) of
+            {ok, Ip} -> Ip;
+            {error, einval} ->
+                {error, {invalid_args,[{address, StrA}]}}
+        end
     end.
 
 vmq_listener_usage() ->

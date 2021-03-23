@@ -248,7 +248,6 @@ translate_listeners(Conf) ->
                                          HTTP_SSLVersions,
                                          HTTP_SSLConfigMod,
                                          HTTP_SSLConfigFun])),
-
     DropUndef = fun(L) ->
                         [{K, [I || {_, V} = I  <- SubL, V /= undefined]} || {K, SubL} <- L]
                 end,
@@ -290,7 +289,7 @@ extract(Prefix, Suffix, Val, Conf) ->
     %% get the name value pairs
     NameSubPrefix = lists:flatten([Prefix, ".$name"]),
     [begin
-         {ok, Addr} = inet:parse_address(StrAddr),
+         Addr = parse_addr(StrAddr),
          Prefix4 = lists:flatten([Prefix, ".", Name, ".", Suffix]),
          V1 = Val(Name, RootDefault, undefined),
          V2 = Val(Name, RootDefault,V1),
@@ -303,6 +302,17 @@ extract(Prefix, Suffix, Val, Conf) ->
                                              fun({K, _V}) ->
                                                      cuttlefish_variable:is_fuzzy_match(K, string:tokens(NameSubPrefix, "."))
                                              end, Conf), not lists:member(Name, Mappings ++ ExcludeRootSuffixes)].
+
+parse_addr(StrA) ->
+     case StrA of
+         {local, SocketFile} -> 
+             {local, SocketFile};
+        _ -> case inet:parse_address(StrA) of
+            {ok, Ip} -> Ip;
+            {error, einval} ->
+                {error, {invalid_args,[{address, StrA}]}}
+        end
+    end.
 
 validate_eccs("") ->
     ssl:eccs();
