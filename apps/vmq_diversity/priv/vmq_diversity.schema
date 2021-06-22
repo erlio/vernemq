@@ -240,8 +240,10 @@
 %%   sha256: Calculates the SHA-2 hash of the password, using 256 bits.
 %%           Works only if MySQL has been configured with SSL support.
 %%           Docs: https://dev.mysql.com/doc/refman/8.0/en/encryption-functions.html#function_sha2
+%%
+%% For enhanced security, please use 'sha1_salt' or 'sha256_salt' respectively.
 {mapping, "vmq_diversity.mysql.password_hash_method", "vmq_diversity.db_config.mysql.password_hash_method",
- [{datatype, {enum, [password, md5, sha1, sha256]}},
+ [{datatype, {enum, [password, md5, sha1, sha256, sha1_salt, sha256_salt]}},
   {default, password}
  ]}.
 

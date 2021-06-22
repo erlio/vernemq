@@ -125,6 +125,8 @@ hash_method(_, St) ->
         password -> <<"PASSWORD(?)">>;
         md5 -> <<"MD5(?)">>;
         sha1 -> <<"SHA1(?)">>;
-        sha256 -> <<"SHA2(?, 256)">>
-    end,
+        sha256 -> <<"SHA2(?, 256)">>;
+        sha1_salt -> <<"SHA1(CONCAT(?, salt))">>;
+        sha256_salt -> <<"SHA2(CONCAT(?, salt), 256)">>
+    end, 
     {[MysqlFunc], St}.

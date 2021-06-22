@@ -24,7 +24,8 @@ require "auth/auth_commons"
      mountpoint VARCHAR(10) NOT NULL,
      client_id VARCHAR(128) NOT NULL,
      username VARCHAR(128) NOT NULL,
-     password VARCHAR(128),
+     password CHAR(64),
+     salt CHAR(32),
      publish_acl TEXT,
      subscribe_acl TEXT,
      CONSTRAINT vmq_auth_acl_primary_key PRIMARY KEY (mountpoint, client_id, username)
@@ -34,17 +35,18 @@ require "auth/auth_commons"
 -- NOTE THAT `PASSWORD()` NEEDS TO BE SUBSTITUTED ACCORDING TO THE HASHING METHOD
 -- CONFIGURED IN `vmq_diversity.mysql.password_hash_method`. CHECK THE MYSQL DOCS TO 
 -- FIND THE MATCHING ONE AT https://dev.mysql.com/doc/refman/8.0/en/encryption-functions.html.
+-- SALTED VERSIONS LOOK LIKE THIS: `PASSWORD(CONCAT('pass123', 'salt123'))`
 --
 -- 
 --[[
 --
    INSERT INTO vmq_auth_acl 
-   (mountpoint, client_id, username, 
-    password, publish_acl, subscribe_acl)
+   (mountpoint, client_id, username, password, salt,
+    publish_acl, subscribe_acl)
  VALUES 
-   ('', 'test-client', 'test-user', 
-    PASSWORD('123'), '[{"pattern":"a/b/c"},{"pattern":"c/b/#"}]', 
-                     '[{"pattern":"a/b/c"},{"pattern":"c/b/#"}]');
+   ('', 'test-client', 'test-user', PASSWORD('pass123'), 'salt123',
+    '[{"pattern":"a/b/c"},{"pattern":"c/b/#"}]',
+    '[{"pattern":"a/b/c"},{"pattern":"c/b/#"}]');
 
 ]]--
 -- 	The JSON array passed as publish/subscribe ACL contains the topic patterns
