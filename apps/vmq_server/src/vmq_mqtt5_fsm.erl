@@ -787,7 +787,7 @@ check_enhanced_auth(#mqtt5_connect{properties=#{?P_AUTHENTICATION_METHOD := Auth
                              ?P_REASON_STRING], M)
         end,
     case vmq_plugin:all_till_ok(on_auth_m5, [UserName, SubscriberId, Props]) of
-        {ok, #{reason_code := ?SUCCESS,
+        {ok, #{reason_code := ?M5_SUCCESS,
                properties :=
                    #{?P_AUTHENTICATION_METHOD := AuthMethod} = Res}} ->
             EnhancedAuth = #auth_data{method = AuthMethod},
