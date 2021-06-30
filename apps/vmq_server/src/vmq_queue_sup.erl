@@ -59,7 +59,11 @@ start_queue(SupPid, SubscriberId, Clean) ->
     end.
 
 get_queue_pid(QueueTabId, SubscriberId) ->
-    case ets:lookup(QueueTabId, SubscriberId) of
+    case catch ets:lookup(QueueTabId, SubscriberId) of
+        {'EXIT', {badarg,Reason}} ->
+            %% handle exception to avoid crash !
+            lager:warning("queue_sup:get_queue_pid intercepted {badarg, ~p} for qtabid ~p subscriberid ~p", [Reason, QueueTabId, SubscriberId]),
+            not_found;
         [] ->
             not_found;
         [{_, Pid}] ->

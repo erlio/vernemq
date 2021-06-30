@@ -194,6 +194,9 @@ register_subscriber_(SessionPid, SubscriberId, StartClean, QueueOpts, N, Reason)
                     false ->
                         Fun = fun(Sid, OldNode) ->
                                       case rpc:call(OldNode, ?MODULE, get_queue_pid, [Sid]) of
+                                          {badrpc, nodedown} ->
+                                              lager:warning("get_queue_pid on old node ~p failed : intercepted {badrpc, nodedown}", [OldNode]),
+                                              done;
                                           not_found ->
                                               case get_queue_pid(Sid) of
                                                   not_found ->
@@ -358,9 +361,10 @@ route_remote_msg(RegView, MP, Topic, Msg) ->
     ok.
 route_remote_msg_fold_fun({_, _} = SubscriberIdAndSubInfo, From, Acc) ->
     publish_fold_fun(SubscriberIdAndSubInfo, From, Acc);
-route_remote_msg_fold_fun(_Node, _, Acc) ->
-    %% we ignore remote subscriptions, they are already covered
-    %% by original publisher
+route_remote_msg_fold_fun(Node, From, Acc) ->
+    %% When this node restarted after e.g a crash, messages buffered in remote node
+    %% will arrive here and need to be handled.
+    publish_fold_fun(Node, From, Acc),
     Acc.
 
 -spec publish_fold_wrapper(module(), client_id(), topic(), msg()) -> {ok, {integer(), integer()}}.

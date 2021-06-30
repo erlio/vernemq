@@ -453,25 +453,24 @@ connected({mail, QPid, Msgs, _, Dropped},
     {NewState2, Out} =
     case handle_messages(Msgs, [], 0, NewState, Waiting) of
         {NewState1, HandledMsgs, []} ->
+            %% messages aren't delivered (yet) but are queued in this process
+            %% we notify the queue that we're ready for new messages.
             vmq_queue:notify(QPid),
             {NewState1, HandledMsgs};
         {NewState1, HandledMsgs, NewWaiting} ->
             %% messages aren't delivered (yet) but are queued in this process
-            %% we tell the queue to get rid of them
-            vmq_queue:notify_recv(QPid),
-            %% we call vmq_queue:notify as soon as
-            %% the check_in_flight returns true again
-            %% SEE: Comment in handle_waiting_msgs function.
+            %% we still have waiting messages
             {NewState1#state{waiting_msgs=NewWaiting}, HandledMsgs}
     end,
     {NewState2, Out};
 connected(#mqtt5_puback{message_id=MessageId, reason_code=RC}, #state{waiting_acks=WAcks} = State) ->
     %% qos1 flow
     _ = vmq_metrics:incr({?MQTT5_PUBACK_RECEIVED, rc2rcn(RC)}),
-    case maps:get(MessageId, WAcks, not_found) of
+    case Msg = maps:get(MessageId, WAcks, not_found) of
         #vmq_msg{} ->
             Cnt = fc_decr_cnt(State#state.fc_send_cnt, puback),
-            handle_waiting_msgs(State#state{fc_send_cnt=Cnt, waiting_acks=maps:remove(MessageId, WAcks)});
+            {NewState, Out} = handle_waiting_msgs(State#state{fc_send_cnt=Cnt, waiting_acks=maps:remove(MessageId, WAcks)}),
+            {release_message(Msg, NewState), Out};
         not_found ->
             _ = vmq_metrics:incr(?MQTT5_PUBACK_INVALID_ERROR),
             {State, []}
@@ -481,12 +480,13 @@ connected(#mqtt5_pubrec{message_id=MessageId, reason_code=RC}, State) when RC < 
     #state{waiting_acks=WAcks} = State,
     %% qos2 flow
     _ = vmq_metrics:incr({?MQTT5_PUBREC_RECEIVED,rc2rcn(RC)}),
-    case maps:get(MessageId, WAcks, not_found) of
+    case Msg = maps:get(MessageId, WAcks, not_found) of
         #vmq_msg{} ->
             PubRelFrame = #mqtt5_pubrel{message_id=MessageId, reason_code=?M5_SUCCESS, properties=#{}},
             _ = vmq_metrics:incr({?MQTT5_PUBREL_SENT, ?SUCCESS}),
-            {State#state{waiting_acks=maps:update(MessageId, PubRelFrame, WAcks)},
-             [serialise_frame(PubRelFrame)]};
+            NewState = State#state{waiting_acks=maps:update(MessageId, PubRelFrame, WAcks)},
+            {release_message(Msg, NewState), [serialise_frame(PubRelFrame)]};
+
         #mqtt5_pubrel{message_id=MessageId} = PubRelFrame ->
             %% handle PUBREC retries from the client.
             _ = vmq_metrics:incr({?MQTT5_PUBREL_SENT, ?SUCCESS}),
@@ -1381,6 +1381,7 @@ prepare_frame(#deliver{qos=QoS, msg_id=MsgId, msg=Msg}, State0) ->
              properties=Props0,
              expiry_ts=ExpiryTS} = Msg,
     NewQoS = maybe_upgrade_qos(QoS, MsgQoS, State0),
+    maybe_release_message(NewQoS, Msg, State0),
     {Topic1, Payload1, Props2} =
     case on_deliver_hook(User, SubscriberId, QoS, Topic0, Payload0, IsRetained, Props0) of
         {error, _} ->
@@ -1419,6 +1420,17 @@ prepare_frame(#deliver{qos=QoS, msg_id=MsgId, msg=Msg}, State0) ->
                waiting_acks=maps:put(OutgoingMsgId,
                                      Msg#vmq_msg{qos=NewQoS}, WAcks)}}
     end.
+
+%% non-upgraded qos0 message is released immediately
+-spec maybe_release_message(qos(), msg(), state()) -> state().
+maybe_release_message(0, Msg, State) -> 
+     release_message(Msg,State);
+maybe_release_message(_,_,State) -> State.
+
+-spec release_message(msg(), state()) -> state().
+release_message(Msg, #state{queue_pid=QPid} = State) -> 
+     vmq_queue:release_message(QPid, Msg),
+     State.
 
 on_deliver_hook(User, SubscriberId, QoS, Topic, Payload, IsRetain, Props) ->
     HookArgs0 = [User, SubscriberId, Topic, Payload, Props],

@@ -37,14 +37,18 @@
           socket,
           transport,
           reachable=false,
+          waiting_for_ack=false,
           pending = [],
+          transit = [],
           max_queue_size,
           reconnect_tref,
+          waiting_ack_tref,
           async_connect_pid,
           bytes_dropped={os:timestamp(), 0},
           bytes_send={os:timestamp(), 0}}).
 
 -define(RECONNECT, 1000).
+-define(ACK_TIMEOUT, 3000).
 
 %%%===================================================================
 %%% API
@@ -120,9 +124,10 @@ init([Parent, RemoteNode]) ->
     erlang:send_after(1000, self(), reconnect),
     loop(#state{parent=Parent, node=RemoteNode, max_queue_size=MaxQueueSize}).
 
-loop(#state{pending=Pending, reachable=Reachable} = State)
+loop(#state{pending=Pending, waiting_for_ack=Waiting, reachable=Reachable} = State)
   when
       Pending == [];
+      Waiting == true;
       Reachable == false ->
     receive
         M ->
@@ -201,20 +206,32 @@ handle_message({connect_async_done, AsyncPid, {ok, {Transport, Socket}}},
     Msg = [<<"vmq-connect">>, <<L:32, NodeName/binary>>],
     case send(Transport, Socket, Msg) of
         ok ->
-            lager:info("successfully connected to cluster node ~p", [RemoteNode]),
-            State#state{socket=Socket, transport=Transport,
+            lager:info("cluster_node ~p : successfully connected to cluster node ~p", [node(), RemoteNode]),
+            NewState = State#state{socket=Socket, transport=Transport,
                         %% !!! remote node is reachable
                         async_connect_pid=undefined,
-                        reachable=true};
+                        reachable=true,
+                        waiting_for_ack=false},
+            internal_flush(NewState);
         {error, Reason} ->
-            lager:warning("can't initiate connect to cluster node ~p due to ~p", [RemoteNode, Reason]),
+            lager:warning("cluster_node ~p : can't initiate connect to cluster node ~p due to ~p", [node(), RemoteNode, Reason]),
             close_reconnect(State)
     end;
 handle_message({connect_async_done, AsyncPid, error}, #state{async_connect_pid=AsyncPid} = State) ->
     % connect_async already logged the error details
     close_reconnect(State);
+handle_message(block_ack, State) ->
+     %% block ack received, cancel timeout timer
+     NewState = cancel_ack_timer(State),
+     NewState#state{waiting_for_ack=false, transit=[]};
 handle_message(reconnect, #state{reachable=false} = State) ->
-    connect(State#state{reconnect_tref=undefined});
+    %% avoid timer interference
+    NewState = cancel_ack_timer(State),
+    connect(NewState#state{reconnect_tref=undefined});
+handle_message(reconnect, #state{reachable=true} = State) ->
+    %% avoid timer interference
+    NewState = cancel_ack_timer(State),
+    close_reconnect(NewState);
 handle_message({status, CallerPid, Ref}, #state{socket=Socket, reachable=Reachable}=State) ->
     Status =
     case Reachable of
@@ -256,12 +273,29 @@ maybe_flush(#state{pending=Pending} = State) ->
             State
     end.
 
+%% In case the receiving node crashes while it still had messages in the receiving tcp buffer
+%% those messages would be lost.
+%% Therefore we introduce a handshake at application level:
+%%  - append a 'tail' to the block of messages that are sent
+%%  - keep a backup copy of the messages in a 'transit' buffer
+%%  - await the block_ack from the receiving node, as it handled the complete block
+%%    (upon receipt of the 'tail')
+%%  - when the block_ack is received, the transit buffer is cleared
+%%    and the next block can be transmitted
+%% This handshake is protected by a timeout which will trigger a reconnect
+%% Note that currently the backup is kept only in memory, a future improvement
+%% would be to persist the backup on disk to also protect against message loss
+%% in case the transmitting node crashes.
 internal_flush(#state{reachable=false} = State) -> State;
-internal_flush(#state{pending=[]} = State) -> State;
-internal_flush(#state{pending=Pending, node=Node, transport=Transport,
+internal_flush(#state{waiting_for_ack=true} = State) -> State;
+internal_flush(#state{pending=[], transit=[]} = State) -> State;
+internal_flush(#state{pending=Pending, transit=Backup, node=Node, transport=Transport,
                       socket=Socket, bytes_send={{M, S, _}, V}} = State) ->
-    L = iolist_size(Pending),
-    Msg = [<<"vmq-send", L:32>>|lists:reverse(Pending)],
+    Transit = [Backup, lists:reverse(Pending)],
+    L = iolist_size(Transit),
+    BinPid = term_to_binary(self()),
+    P = byte_size(BinPid),
+    Msg = [<<"vmq-send", L:32>>, Transit, <<"vmq-tail", P:32>>, BinPid],
     case send(Transport, Socket, Msg) of
         ok ->
             NewBytesSend =
@@ -272,10 +306,9 @@ internal_flush(#state{pending=Pending, node=Node, transport=Transport,
                     _ = vmq_metrics:incr_cluster_bytes_sent(V + L),
                     {TS, 0}
             end,
-            State#state{pending=[], bytes_send=NewBytesSend};
+            State#state{pending=[], transit=Transit, waiting_for_ack=true, waiting_ack_tref=waiting_ack_timer(), bytes_send=NewBytesSend};
         {error, Reason} ->
-            lager:warning("can't send ~p bytes to ~p due to ~p, reconnect!",
-                          [iolist_size(Pending), Node, Reason]),
+            lager:warning("can't send ~p bytes to ~p due to ~p, reconnect!", [L, Node, Reason]),
             close_reconnect(State)
     end.
 
@@ -331,6 +364,13 @@ close_reconnect(#state{transport=Transport, socket=Socket} = State) ->
 reconnect_timer() ->
     erlang:send_after(?RECONNECT, self(), reconnect).
 
+waiting_ack_timer() ->
+    erlang:send_after(?ACK_TIMEOUT, self(), reconnect).
+
+cancel_ack_timer(#state{waiting_ack_tref=undefined} = State) -> State;
+cancel_ack_timer(#state{waiting_ack_tref=WaitingAckTref} = State) ->
+    erlang:cancel_timer(WaitingAckTref),
+    State#state{waiting_ack_tref=undefined}.
 
 %% connect_params is called by a RPC
 connect_params(_Node) ->

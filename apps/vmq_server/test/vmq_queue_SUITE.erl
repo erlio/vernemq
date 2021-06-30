@@ -345,6 +345,7 @@ mock_session(Parent) ->
             mock_session(Parent);
         {to_session_fsm, {mail, QPid, Msgs, _, _}} ->
             vmq_queue:notify(QPid),
+            release_msgs(QPid, Msgs),
             timer:sleep(100),
             Parent ! {received, QPid, Msgs},
             mock_session(Parent);
@@ -353,6 +354,11 @@ mock_session(Parent) ->
         _ -> % go down
             ok
     end.
+
+release_msgs(_, []) -> ok;
+release_msgs(QPid, [Msg | Rest]) ->
+    vmq_queue:release_message(QPid, Msg),
+    release_msgs(QPid, Rest).
 
 msg(Topic, Payload, QoS) ->
     #vmq_msg{msg_ref=vmq_mqtt_fsm_util:msg_ref(),

@@ -295,24 +295,23 @@ connected({mail, QPid, Msgs, _, Dropped},
     {NewState2, Out} =
     case handle_messages(Msgs, [], 0, NewState, Waiting) of
         {NewState1, HandledMsgs, []} ->
-            vmq_queue:notify(QPid),
+            %% messages aren't delivered (yet) but are queued in this process
+            %% we notify the queue that we're ready for new messages.
+            vmq_queue:notify(QPid), 
             {NewState1, HandledMsgs};
         {NewState1, HandledMsgs, NewWaiting} ->
             %% messages aren't delivered (yet) but are queued in this process
-            %% we tell the queue to get rid of them
-            vmq_queue:notify_recv(QPid),
-            %% we call vmq_queue:notify as soon as
-            %% the check_in_flight returns true again
-            %% SEE: Comment in handle_waiting_msgs function.
+            %% we still have waiting messages
             {NewState1#state{waiting_msgs=NewWaiting}, HandledMsgs}
     end,
     {NewState2, Out};
 connected(#mqtt_puback{message_id=MessageId}, #state{waiting_acks=WAcks} = State) ->
     %% qos1 flow
     _ = vmq_metrics:incr_mqtt_puback_received(),
-    case maps:get(MessageId, WAcks, not_found) of
+    case Msg = maps:get(MessageId, WAcks, not_found) of
         #vmq_msg{} ->
-            handle_waiting_msgs(State#state{waiting_acks=maps:remove(MessageId, WAcks)});
+            {NewState, Out} = handle_waiting_msgs(State#state{waiting_acks=maps:remove(MessageId, WAcks)}),
+            {release_message(Msg, NewState), Out};
         not_found ->
             _ = vmq_metrics:incr_mqtt_error_invalid_puback(),
             {State, []}
@@ -322,14 +321,14 @@ connected(#mqtt_pubrec{message_id=MessageId}, State) ->
            retry_queue=RetryQueue} = State,
     %% qos2 flow
     _ = vmq_metrics:incr_mqtt_pubrec_received(),
-    case maps:get(MessageId, WAcks, not_found) of
+    case Msg = maps:get(MessageId, WAcks, not_found) of
         #vmq_msg{} ->
             PubRelFrame = #mqtt_pubrel{message_id=MessageId},
             _ = vmq_metrics:incr_mqtt_pubrel_sent(),
-            {State#state{
+            NewState = State#state{
                retry_queue=set_retry(pubrel, MessageId, RetryInterval, RetryQueue),
                waiting_acks=maps:update(MessageId, PubRelFrame, WAcks)},
-            [PubRelFrame]};
+            {release_message(Msg, NewState), [PubRelFrame]};
         #mqtt_pubrel{message_id=MessageId} = PubRelFrame ->
             %% handle PUBREC retries from the client.
             _ = vmq_metrics:incr_mqtt_pubrel_sent(),
@@ -904,7 +903,6 @@ handle_waiting_msgs(#state{waiting_msgs=[]} = State) ->
 handle_waiting_msgs(#state{waiting_msgs=Msgs, queue_pid=QPid} = State) ->
     case handle_messages(lists:reverse(Msgs), [], 0, State, []) of
         {NewState, HandledMsgs, []} ->
-            %% we're ready to take more
             vmq_queue:notify(QPid),
             {NewState#state{waiting_msgs=[]}, HandledMsgs};
         {NewState, HandledMsgs, Waiting} ->
@@ -950,6 +948,7 @@ prepare_frame(#deliver{qos=QoS, msg_id=MsgId, msg=Msg}, State) ->
              dup=IsDup,
              qos=MsgQoS} = Msg,
     NewQoS = maybe_upgrade_qos(QoS, MsgQoS, State),
+    maybe_release_message(NewQoS, Msg, State),
     {NewTopic, NewPayload} =
     case on_deliver_hook(User, SubscriberId, QoS, Topic, Payload, IsRetained) of
         {error, _} ->
@@ -980,6 +979,17 @@ prepare_frame(#deliver{qos=QoS, msg_id=MsgId, msg=Msg}, State) ->
                       waiting_acks=maps:put(OutgoingMsgId,
                                             Msg#vmq_msg{qos=NewQoS}, WAcks)}}
     end.
+
+%% non-upgraded qos0 message is released immediately
+-spec maybe_release_message(qos(), msg(), state()) -> state().
+maybe_release_message(0, Msg, State) -> 
+     release_message(Msg,State);
+maybe_release_message(_,_,State) -> State.
+
+-spec release_message(msg(), state()) -> state().
+release_message(Msg, #state{queue_pid=QPid} = State) -> 
+     vmq_queue:release_message(QPid, Msg),
+     State.
 
 -spec on_deliver_hook(username(), subscriber_id(), qos(), topic(), payload(), flag()) -> any().
 on_deliver_hook(User, SubscriberId, QoS, Topic, Payload, IsRetain) ->

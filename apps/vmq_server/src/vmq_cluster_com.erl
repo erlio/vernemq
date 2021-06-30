@@ -158,6 +158,10 @@ process_bytes(Bytes, Buffer, St) ->
         <<"vmq-send", L:32, BFrames:L/binary, Rest/binary>> ->
             process(BFrames, St),
             process_bytes(Rest, <<>>, St);
+        <<"vmq-tail", L:32, BinPid:L/binary, Rest/binary>> ->
+            Pid = binary_to_term(BinPid),
+            Pid ! block_ack,
+            process_bytes(Rest, <<>>, St);
         _ ->
             %% if we have received something else than "vmq-send" we
             %% will buffer everything unbounded forever and ever!

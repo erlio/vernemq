@@ -34,7 +34,7 @@
 -export([start_link/2,
          active/1,
          notify/1,
-         notify_recv/1,
+         release_message/2,
          enqueue/2,
          status/1,
          info/1,
@@ -120,11 +120,11 @@ active(Queue) when is_pid(Queue) ->
 notify(Queue) when is_pid(Queue) ->
     gen_fsm:send_event(Queue, {change_state, notify, self()}).
 
-notify_recv(Queue) when is_pid(Queue) ->
-    gen_fsm:send_event(Queue, {notify_recv, self()}).
+release_message(Queue, Msg) when is_pid(Queue) ->
+    gen_fsm:send_event(Queue, {release_message, Msg, self()}).
 
 enqueue(Queue, Msg) when is_pid(Queue) ->
-    gen_fsm:send_event(Queue, {enqueue, to_internal(Msg)}).
+    gen_fsm:sync_send_event(Queue, {enqueue, to_internal(Msg)}, infinity).
 
 enqueue_many(Queue, Msgs) when is_pid(Queue) and is_list(Msgs) ->
     NMsgs = lists:map(fun to_internal/1, Msgs),
@@ -215,21 +215,20 @@ default_opts() ->
 %%%===================================================================
 online({change_state, NewSessionState, SessionPid}, State) ->
     {next_state, online, change_session_state(NewSessionState, SessionPid, State)};
-online({notify_recv, SessionPid}, #state{id=SId, sessions=Sessions} = State) ->
+online({release_message, Msg, SessionPid}, #state{id=SId, sessions=Sessions} = State) ->
     #session{queue=#queue{backup=Backup} = Queue} = Session = maps:get(SessionPid, Sessions),
-    cleanup_queue(SId, Backup),
+    NewBackup = release_backup_message(SId, Msg, Backup),
     NewSessions = maps:update(SessionPid,
-                              Session#session{queue=Queue#queue{backup=queue:new()}},
+                              Session#session{queue=Queue#queue{backup=NewBackup}},
                               Sessions),
-    _ = vmq_metrics:incr_queue_out(queue:len(Backup)),
     {next_state, online, State#state{sessions=NewSessions}};
-online({enqueue, Msg}, State) ->
-    _ = vmq_metrics:incr_queue_in(),
-    {next_state, online, insert(Msg, State)};
 online(Event, State) ->
     lager:error("got unknown event in online state ~p", [Event]),
     {next_state, online, State}.
 
+online({enqueue, Msg}, _From, State) ->
+    _ = vmq_metrics:incr_queue_in(),
+    {reply, ok, online, insert(Msg, State)};
 online({set_opts, SessionPid, Opts}, _From, #state{opts=OldOpts} = State) ->
     MergedOpts = maps:merge(OldOpts, Opts),
     NewState1 = set_general_opts(MergedOpts, State#state{opts=MergedOpts}),
@@ -272,14 +271,13 @@ online(Event, _From, State) ->
     lager:error("got unknown sync event in online state ~p", [Event]),
     {reply, {error, online}, State}.
 
-wait_for_offline({enqueue, Msg}, State) ->
-    _ = vmq_metrics:incr_queue_in(),
-    {next_state, wait_for_offline, insert(Msg, State)};
 wait_for_offline(Event, State) ->
     lager:error("got unknown event in wait_for_offline state ~p", [Event]),
     {next_state, wait_for_offline, State}.
 
-
+wait_for_offline({enqueue, Msg}, _From, State) ->
+    _ = vmq_metrics:incr_queue_in(),
+    {reply, ok, wait_for_offline, insert(Msg, State)};
 wait_for_offline({set_last_waiting_acks, WAcks, NextMsgId}, _From, State) ->
     {reply, ok, wait_for_offline, handle_waiting_acks_and_msgs(WAcks, NextMsgId, State)};
 wait_for_offline({add_session, SessionPid, Opts}, From,
@@ -373,15 +371,6 @@ drain(drain_start, #state{id=SId, offline=#queue{queue=Q} = Queue,
              State#state{offline=Queue#queue{size=queue:len(NewQ), drop=0, queue=NewQ},
                          drain_pending_batch={MRef, Ref, DrainQ}}}
     end;
-drain({enqueue, Msg}, #state{drain_over_timer=TRef} =  State) ->
-    %% even in drain state it is possible that an enqueue message
-    %% reaches this process, so we've to queue this message otherwise
-    %% it would be lost.
-    gen_fsm:cancel_timer(TRef),
-    gen_fsm:send_event(self(), drain_start),
-    _ = vmq_metrics:incr_queue_in(),
-    {next_state, drain, insert(Msg, State)};
-
 drain(drain_over, #state{waiting_call={migrate, _, From}} =
       #state{offline=#queue{size=0}} = State) ->
     %% we're done with the migrate, offline queue is empty
@@ -395,6 +384,14 @@ drain(Event, State) ->
     lager:error("got unknown event in drain state ~p", [Event]),
     {next_state, drain, State}.
 
+drain({enqueue, Msg}, _From, #state{drain_over_timer=TRef} =  State) ->
+    %% even in drain state it is possible that an enqueue message
+    %% reaches this process, so we've to queue this message otherwise
+    %% it would be lost.
+    gen_fsm:cancel_timer(TRef),
+    gen_fsm:send_event(self(), drain_start),
+    _ = vmq_metrics:incr_queue_in(),
+    {reply, ok, drain, insert(Msg, State)};
 drain({enqueue_many, Msgs}, _From, #state{drain_over_timer=TRef} =  State) ->
     gen_fsm:cancel_timer(TRef),
     gen_fsm:send_event(self(), drain_start),
@@ -424,18 +421,6 @@ offline(init_offline_queue, #state{id=SId} = State) ->
             gen_fsm:send_event_after(1000, init_offline_queue),
             {next_state, offline, State}
     end;
-offline({enqueue, Enq}, #state{id=SId} = State) ->
-    case Enq of
-        #deliver{qos=QoS, msg=#vmq_msg{routing_key=Topic,
-                                       payload=Payload,
-                                       retain=Retain}} ->
-            _ = vmq_plugin:all(on_offline_message, [SId, QoS, Topic, Payload, Retain]);
-        _ ->
-            ignore
-    end,
-    %% storing the message in the offline queue
-    _ = vmq_metrics:incr_queue_in(),
-    {next_state, offline, insert(Enq, State)};
 offline(expire_session, #state{id=SId, offline=#queue{queue=Q}} = State) ->
     %% session has expired cleanup and go down
     vmq_plugin:all(on_topic_unsubscribed, [SId, all_topics]),
@@ -451,6 +436,19 @@ offline(publish_last_will, State) ->
 offline(Event, State) ->
     lager:error("got unknown event in offline state ~p", [Event]),
     {next_state, offline, State}.
+
+offline({enqueue, Enq}, _From, #state{id=SId} = State) ->
+    case Enq of
+        #deliver{qos=QoS, msg=#vmq_msg{routing_key=Topic,
+                                       payload=Payload,
+                                       retain=Retain}} ->
+            _ = vmq_plugin:all(on_offline_message, [SId, QoS, Topic, Payload, Retain]);
+        _ ->
+            ignore
+    end,
+    %% storing the message in the offline queue
+    _ = vmq_metrics:incr_queue_in(),
+    {reply, ok, offline, insert(Enq, State)};
 offline({add_session, SessionPid, Opts}, _From, State) ->
     ReturnOpts = #{initial_msg_id => State#state.initial_msg_id},
     {reply, {ok, ReturnOpts}, state_change(add_session, offline, online),
@@ -757,12 +755,19 @@ handle_session_down(SessionPid, StateName,
             {next_state, StateName, NewState}
     end.
 
+handle_waiting_acks_and_msgs([], NextMsgId, State) -> State#state{initial_msg_id=NextMsgId};
 handle_waiting_acks_and_msgs(WAcks, NextMsgId, #state{id=SId, sessions=Sessions, offline=Offline} = State) ->
     %% we can only handle the last waiting acks and msgs if this is
     %% the last session active for this queue.
     case maps:size(Sessions) of
         1 ->
             %% this is the last active session
+            [{SessionPid, Session}] = maps:to_list(Sessions),
+             #session{queue=#queue{backup=Backup} = Queue} = Session,
+            cleanup_queue(SId, Backup),
+             NewSessions = maps:update(SessionPid,
+                              Session#session{queue=Queue#queue{backup=queue:new()}},
+                             Sessions),
             NewOfflineQueue =
             lists:foldl(
               fun(#deliver{msg=#vmq_msg{persisted=true} = Msg}=D, AccOffline) ->
@@ -770,7 +775,7 @@ handle_waiting_acks_and_msgs(WAcks, NextMsgId, #state{id=SId, sessions=Sessions,
                  (Msg, AccOffline) ->
                       queue_insert(true, Msg, AccOffline, SId)
               end, Offline, WAcks),
-            State#state{offline=NewOfflineQueue, initial_msg_id=NextMsgId};
+            State#state{offline=NewOfflineQueue, sessions=NewSessions, initial_msg_id=NextMsgId};
         N ->
             lager:debug("handle waiting acks for multiple sessions (~p) not possible", [N]),
             %% it doesn't make sense to keep the waiting acks around
@@ -793,11 +798,8 @@ disconnect_sessions(Reason, #state{sessions=Sessions}) ->
               end, ok, Sessions).
 
 change_session_state(NewState, SessionPid, #state{id=SId, sessions=Sessions} = State) ->
-    #session{queue=#queue{backup=Backup} = Queue} = Session = maps:get(SessionPid, Sessions),
-    cleanup_queue(SId, Backup),
-    _ = vmq_metrics:incr_queue_out(queue:len(Backup)),
-    UpdatedSession = change_session_state_(NewState, SId,
-                                           Session#session{queue=Queue#queue{backup=queue:new()}}),
+    Session = maps:get(SessionPid, Sessions),
+    UpdatedSession = change_session_state_(NewState, SId, Session),                                       
     NewSessions = maps:update(SessionPid, UpdatedSession, Sessions),
     State#state{sessions=NewSessions}.
 
@@ -916,15 +918,20 @@ send(SId, #session{pid=Pid, queue=Q,
                   queue_to_session_batch_size = BatchSize} = Session) ->
     Session#session{status=passive, queue=send(SId, Pid, BatchSize, Q)}.
 
-send(SId, Pid, BatchSize, #queue{type=fifo, queue=Queue, size=Count, drop=Dropped} = Q) ->
+%% To protect against message loss in case the publishing node crashes the messages
+%% that we send to the publishing process (vmq_mqtt_fsm) are preserved in the backup queue
+%% and only released when they are actually delivered to the subscriber.
+%% see : comment in  release_backup_message function.
+send(SId, Pid, BatchSize, #queue{type=fifo, queue=Queue, backup=Backup, size=Count, drop=Dropped} = Q) ->
     {Batch, NewQueue, NewCount} = prepare_msgs(SId, queue:new(), Queue, Count, BatchSize),
     Msgs = queue:to_list(Batch),
     vmq_mqtt_fsm_util:send(Pid, {mail, self(), Msgs, Count, Dropped}),
-    Q#queue{queue=NewQueue, backup=Batch, size=NewCount, drop=0};
-send(SId, Pid, _BatchSize, #queue{type=lifo, queue=Queue, size=Count, drop=Dropped} = Q) ->
-    Msgs = maybe_expire_msgs(SId, lists:reverse(queue:to_list(Queue))),
+    Q#queue{queue=NewQueue, backup=queue:join(Backup,Batch), size=NewCount, drop=0};
+send(SId, Pid, _BatchSize, #queue{type=lifo, queue=Queue, backup=Backup, size=Count, drop=Dropped} = Q) ->
+    RevList = lists:reverse(queue:to_list(Queue)),
+    Msgs = maybe_expire_msgs(SId, RevList),
     vmq_mqtt_fsm_util:send(Pid, {mail, self(), Msgs, Count, Dropped}),
-    Q#queue{queue=queue:new(), backup=Queue, size=0, drop=0}.
+   Q#queue{queue=queue:new(), backup=queue:join(Backup,queue:from_list(RevList)), size=0, drop=0}.
 
 prepare_msgs(_SId, OQ, Q, QC, 0) ->
     {OQ, Q, QC};
@@ -941,6 +948,7 @@ prepare_msgs(SId, OQ, Q, QC, N) ->
                             prepare_msgs(SId, NOQ, NQ, QC - 1, N-1)
                     end;
                 {error, _} ->
+                    lager:warning("queue:prepare_msgs : deref failed! =>  skipped"),
                     prepare_msgs(SId, OQ, NQ, QC - 1, N)
             end;
         {empty, _} ->
@@ -982,6 +990,35 @@ cleanup_queue_(SId, {{value, MsgRef}, NewQueue}) when is_binary(MsgRef) ->
     cleanup_queue_(SId, queue:out(NewQueue));
 cleanup_queue_(_, {empty, _}) -> ok.
 
+%%-spec release_backup_message(subscriber_id(), msg(), queue()) -> queue().
+release_backup_message(SId, Msg, Backup) ->
+    release_backup_message_(SId, Msg, queue:out(Backup)).
+
+%% When the vmq_mqtt_fsm process has actually delivered the message to the subscriber
+%% it will notify the queue to release the message from the backup queue.
+%% QoS0 messages will be released as soon as vmq_mqtt_fsm sends them,
+%% while Qos1 and QoS2 messages must be acknowledged by the subscriber before they can
+%% be released.
+%% Note : 
+%%  - we expect the messages to be delivered in-order hence 
+%%    they can be removed from the head of the backup queue.
+%%  - leading QoS0 messages might be present and are therefore removed first
+release_backup_message_(_,_, {empty, Backup}) -> Backup;
+release_backup_message_(SId, #deliver{msg=Msg}, {{value, #deliver{msg=Msg} = QMsg}, NewBackup}) ->
+    maybe_offline_delete(SId, QMsg),      %% remove matching message
+    _ = vmq_metrics:incr_queue_out(1),
+    NewBackup;
+release_backup_message_(SId, #vmq_msg{} = Msg, {{value, #deliver{msg=Msg} = QMsg}, NewBackup}) ->
+    maybe_offline_delete(SId, QMsg),      %% remove matching message
+    _ = vmq_metrics:incr_queue_out(1),
+    NewBackup;
+release_backup_message_(SId, Msg, {{value, #deliver{msg=#vmq_msg{qos=0}} = QMsg}, NewBackup}) ->
+    maybe_offline_delete(SId, QMsg),      %% remove leading qos0 message(s) first
+    _ = vmq_metrics:incr_queue_out(1),
+    release_backup_message_(SId, Msg, queue:out(NewBackup));
+release_backup_message_(_SId, Msg, {{value, QMsg}, NewBackup}) ->
+    lager:error("queue:release_backup_message : message/deliver mismatch : msg = ~p~n  hd(Q) = ~p", [Msg, QMsg]),
+    NewBackup.
 
 session_fold(SId, Fun, Acc, Map) ->
     session_fold(SId, Fun, Acc, Map, maps:keys(Map)).
