@@ -67,6 +67,7 @@ groups() ->
     V4V5Tests =
         [publish_qos1_test,
          publish_qos2_test,
+         publish_to_dollar_topic,
          publish_b2c_qos2_duplicate_test,
          publish_c2b_qos2_duplicate_test,
          publish_b2c_disconnect_qos1_test,
@@ -74,7 +75,7 @@ groups() ->
          publish_c2b_disconnect_qos2_test,
          publish_b2c_ensure_valid_msg_ids_test,
          pattern_matching_test,
-         drop_dollar_topic_publish,
+         drop_dollar_sys_topic_publish,
          message_size_exceeded_close,
          shared_subscription_offline,
          shared_subscription_online_first,
@@ -117,6 +118,20 @@ publish_qos1_test(Config) ->
     Connack = mqtt5_v4compat:gen_connack(success, Config),
     Publish = mqtt5_v4compat:gen_publish("pub/qos1/test", 1, <<"message">>,
                                          [{mid, 19}], Config),
+    Puback = mqtt5_v4compat:gen_puback(19, Config),
+    {ok, Socket} = mqtt5_v4compat:do_client_connect(Connect, Connack, [], Config),
+    enable_on_publish(),
+    ok = gen_tcp:send(Socket, Publish),
+    ok = mqtt5_v4compat:expect_packet(Socket, "puback", Puback, Config),
+    disable_on_publish(),
+    ok = expect_alive(Socket),
+    ok = gen_tcp:close(Socket).
+
+publish_to_dollar_topic(Config) ->
+    Connect = mqtt5_v4compat:gen_connect("publish-dollar-test", [{keepalive, 60}], Config),
+    Connack = mqtt5_v4compat:gen_connack(success, Config),
+    Topic = "$test/drop",
+    Publish = mqtt5_v4compat:gen_publish(Topic, 1, <<"message">>, [{mid, 19}], Config),
     Puback = mqtt5_v4compat:gen_puback(19, Config),
     {ok, Socket} = mqtt5_v4compat:do_client_connect(Connect, Connack, [], Config),
     enable_on_publish(),
@@ -675,11 +690,10 @@ not_allowed_publish_close_qos2_mqtt_3_1_1(_) ->
     gen_tcp:send(Socket, Publish),
     {error, closed} = gen_tcp:recv(Socket, 0, 1000).
 
-
-drop_dollar_topic_publish(Config) ->
-    Connect = mqtt5_v4compat:gen_connect("drop-dollar-test", [{keepalive, 60}], Config),
+drop_dollar_sys_topic_publish(Config) ->
+    Connect = mqtt5_v4compat:gen_connect("drop-dollar-sys-test", [{keepalive, 60}], Config),
     Connack = mqtt5_v4compat:gen_connack(success, Config),
-    Topic = "$test/drop",
+    Topic = "$SYS/drop",
     Publish = mqtt5_v4compat:gen_publish(Topic, 1, <<"message">>, [{mid, 1}], Config),
     vmq_test_utils:reset_tables(),
     {ok, Socket} = mqtt5_v4compat:do_client_connect(Connect, Connack, [], Config),

@@ -395,7 +395,7 @@ connected(#mqtt5_publish{message_id=MessageId, topic=Topic,
     _ = vmq_metrics:incr(?MQTT5_PUBLISH_RECEIVED),
     Ret =
     case Topic of
-        [<<"$", _/binary>> |_] ->
+        [<<"$SYS", _/binary>> |_] ->
             %% $SYS
             [];
         _ ->

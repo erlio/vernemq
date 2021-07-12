@@ -239,7 +239,7 @@ connected(#mqtt_publish{message_id=MessageId, topic=Topic,
     _ = vmq_metrics:incr_mqtt_publish_received(),
     Ret =
     case Topic of
-        [<<"$", _/binary>> |_] ->
+        [<<"$SYS", _/binary>> |_] ->
             %% $SYS
             [];
         _ ->
